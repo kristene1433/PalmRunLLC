@@ -1377,7 +1377,7 @@ const AdminApplicationDetails = () => {
                               <Trash2 className="w-3 h-3" />
                             </button>
                           </div>
-                          <p className="text-xs text-green-700">
+                          <p className="text-xs text-green-700 break-all">
                             {application.signedLeaseFile?.originalName 
                               ? `File: ${application.signedLeaseFile.originalName}`
                               : `File: lease_${application._id}.pdf`
@@ -1430,7 +1430,7 @@ const AdminApplicationDetails = () => {
                               <Trash2 className="w-3 h-3" />
                             </button>
                           </div>
-                          <p className="text-xs text-green-700">
+                          <p className="text-xs text-green-700 break-all">
                             {application.signedLeaseFile?.originalName 
                               ? `File: ${application.signedLeaseFile.originalName}`
                               : `File: lease_${application._id}.pdf`

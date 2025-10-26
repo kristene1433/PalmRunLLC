@@ -7,6 +7,102 @@ const { auth } = require('../middleware/auth');
 const router = express.Router();
 const webhookRouter = express.Router();
 
+const DAY_IN_MS = 24 * 60 * 60 * 1000;
+const padMonth = (value) => String(value).padStart(2, '0');
+
+const parseDateOnly = (value) => {
+  if (!value) return null;
+  if (value instanceof Date) {
+    return new Date(value);
+  }
+
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const [year, month, day] = value.split('-').map(Number);
+    return new Date(Date.UTC(year, month - 1, day));
+  }
+
+  const parsed = new Date(value);
+  return isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const getMonthKey = (date) => {
+  const safeDate = new Date(date);
+  return `${safeDate.getUTCFullYear()}-${padMonth(safeDate.getUTCMonth() + 1)}`;
+};
+
+const calculateAccrualAllocations = (application) => {
+  const allocations = {};
+  const nightsByMonth = {};
+
+  const leaseStart = parseDateOnly(application.leaseStartDate || application.requestedStartDate);
+  const leaseEnd = parseDateOnly(application.leaseEndDate || application.requestedEndDate);
+
+  if (!leaseStart || !leaseEnd || leaseEnd < leaseStart) {
+    return { allocations, nightsByMonth };
+  }
+
+  const monthlyRent = Number(application.rentalAmount || 0);
+  if (!monthlyRent) {
+    return { allocations, nightsByMonth };
+  }
+
+  let currentMonth = new Date(Date.UTC(leaseStart.getUTCFullYear(), leaseStart.getUTCMonth(), 1));
+  const finalMonth = new Date(Date.UTC(leaseEnd.getUTCFullYear(), leaseEnd.getUTCMonth(), 1));
+
+  while (currentMonth <= finalMonth) {
+    const monthStart = new Date(currentMonth);
+    const monthEnd = new Date(Date.UTC(currentMonth.getUTCFullYear(), currentMonth.getUTCMonth() + 1, 0));
+
+    const activeStart = new Date(Math.max(monthStart.getTime(), leaseStart.getTime()));
+    const activeEnd = new Date(Math.min(monthEnd.getTime(), leaseEnd.getTime()));
+
+    if (activeEnd < activeStart) {
+      currentMonth = new Date(Date.UTC(currentMonth.getUTCFullYear(), currentMonth.getUTCMonth() + 1, 1));
+      continue;
+    }
+
+    const activeDays = Math.round((activeEnd - activeStart) / DAY_IN_MS) + 1;
+    const daysInMonth = Math.round((monthEnd - monthStart) / DAY_IN_MS) + 1;
+
+    if (activeDays <= 0 || daysInMonth <= 0) {
+      currentMonth = new Date(Date.UTC(currentMonth.getUTCFullYear(), currentMonth.getUTCMonth() + 1, 1));
+      continue;
+    }
+
+    const proratedAmount = monthlyRent * (activeDays / daysInMonth);
+    const cents = Math.round(proratedAmount * 100);
+    const monthKey = getMonthKey(monthStart);
+
+    allocations[monthKey] = (allocations[monthKey] || 0) + cents;
+    nightsByMonth[monthKey] = (nightsByMonth[monthKey] || 0) + activeDays;
+
+    currentMonth = new Date(Date.UTC(currentMonth.getUTCFullYear(), currentMonth.getUTCMonth() + 1, 1));
+  }
+
+  return { allocations, nightsByMonth };
+};
+
+const getPeriodConfig = (period, year, month) => {
+  if (period === 'year' && year) {
+    return { type: 'year', year: parseInt(year, 10) };
+  }
+  if (period === 'month' && year && month) {
+    return { type: 'month', year: parseInt(year, 10), month: parseInt(month, 10) };
+  }
+  return { type: 'all' };
+};
+
+const monthMatchesPeriod = (monthKey, periodConfig) => {
+  if (periodConfig.type === 'year') {
+    return monthKey.startsWith(`${periodConfig.year}-`);
+  }
+  if (periodConfig.type === 'month') {
+    const expected = `${periodConfig.year}-${padMonth(periodConfig.month)}`;
+    return monthKey === expected;
+  }
+  return true;
+};
+
 // Stripe webhook handler for payment completion - MUST use raw body
 async function handleStripeWebhook(req, res) {
   const sig = req.headers['stripe-signature'];
@@ -834,6 +930,7 @@ router.get('/admin/revenue-summary', auth, async (req, res) => {
     }
 
     const { period = 'all', year, month } = req.query;
+    const periodConfig = getPeriodConfig(period, year, month);
 
     // Build date filter based on period
     let dateFilter = {};
@@ -893,6 +990,88 @@ router.get('/admin/revenue-summary', auth, async (req, res) => {
       }
     });
 
+    // Gather lease data for accrual calculations
+    const applications = await Application.find({
+      leaseGenerated: true,
+      leaseStartDate: { $exists: true, $ne: null },
+      leaseEndDate: { $exists: true, $ne: null }
+    }).select('leaseStartDate leaseEndDate requestedStartDate requestedEndDate rentalAmount depositAmount');
+
+    const accrualTimeline = {};
+    const occupancyTimeline = {};
+    let outstandingDeposits = 0;
+    let releasedDeposits = 0;
+    const nowDate = new Date();
+
+    applications.forEach((application) => {
+      const { allocations, nightsByMonth } = calculateAccrualAllocations(application);
+
+      Object.entries(allocations).forEach(([monthKey, amount]) => {
+        accrualTimeline[monthKey] = (accrualTimeline[monthKey] || 0) + amount;
+      });
+
+      Object.entries(nightsByMonth).forEach(([monthKey, nights]) => {
+        occupancyTimeline[monthKey] = (occupancyTimeline[monthKey] || 0) + nights;
+      });
+
+      const depositCents = Math.round(Number(application.depositAmount || 0) * 100);
+      if (depositCents > 0) {
+        const leaseEnd = parseDateOnly(application.leaseEndDate || application.requestedEndDate);
+        if (leaseEnd && leaseEnd > nowDate) {
+          outstandingDeposits += depositCents;
+        } else if (leaseEnd) {
+          releasedDeposits += depositCents;
+        }
+      }
+    });
+
+    // Filter accrual totals based on requested period
+    let totalAccrualEarned = 0;
+    let totalOccupiedNights = 0;
+    const monthsCovered = new Set();
+
+    Object.entries(accrualTimeline).forEach(([monthKey, amount]) => {
+      if (monthMatchesPeriod(monthKey, periodConfig)) {
+        totalAccrualEarned += amount;
+        monthsCovered.add(monthKey);
+      }
+    });
+
+    Object.entries(occupancyTimeline).forEach(([monthKey, nights]) => {
+      if (monthMatchesPeriod(monthKey, periodConfig)) {
+        totalOccupiedNights += nights;
+        monthsCovered.add(monthKey);
+      }
+    });
+
+    const monthsInPeriod = monthsCovered.size || (periodConfig.type === 'month'
+      ? 1
+      : periodConfig.type === 'year'
+        ? 12
+        : Object.keys(accrualTimeline).length || 1);
+
+    const averageMonthlyEarned = monthsInPeriod > 0
+      ? Math.round(totalAccrualEarned / monthsInPeriod)
+      : 0;
+    const averageNightlyRate = totalOccupiedNights > 0
+      ? Math.round(totalAccrualEarned / totalOccupiedNights)
+      : 0;
+
+    const currentMonthKey = getMonthKey(new Date());
+    let upcomingRevenue = 0;
+    Object.entries(accrualTimeline).forEach(([monthKey, amount]) => {
+      if (monthKey > currentMonthKey) {
+        upcomingRevenue += amount;
+      }
+    });
+
+    const accrualMonthlyRevenue = {};
+    const occupancyByMonth = {};
+    Object.keys(monthlyRevenue).forEach((monthKey) => {
+      accrualMonthlyRevenue[monthKey] = accrualTimeline[monthKey] || 0;
+      occupancyByMonth[monthKey] = occupancyTimeline[monthKey] || 0;
+    });
+
     res.json({
       summary: {
         totalRevenue,
@@ -903,6 +1082,20 @@ router.get('/admin/revenue-summary', auth, async (req, res) => {
       },
       revenueByType,
       monthlyRevenue,
+      accrualMonthlyRevenue,
+      occupancyByMonth,
+      accrualSummary: {
+        totalEarned: totalAccrualEarned,
+        occupiedNights: totalOccupiedNights,
+        averageMonthlyEarned,
+        averageNightlyRate,
+        monthsInPeriod,
+        outstandingDeposits,
+        releasedDeposits,
+        upcomingRevenue
+      },
+      accrualTimeline,
+      occupancyTimeline,
       payments: payments.slice(0, 50) // Return recent payments for detailed view
     });
   } catch (error) {
