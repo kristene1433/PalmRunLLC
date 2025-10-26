@@ -40,6 +40,50 @@ const AdminApplicationDetails = () => {
   const [availableApplications, setAvailableApplications] = useState([]);
   const [loadingApplications, setLoadingApplications] = useState(false);
   const [savingTransfer, setSavingTransfer] = useState(false);
+  const [showLeaseModal, setShowLeaseModal] = useState(false);
+  const [generatingLease, setGeneratingLease] = useState(false);
+  const [leaseFormData, setLeaseFormData] = useState({
+    leaseStartDate: '',
+    leaseEndDate: '',
+    rentalAmount: '',
+    depositAmount: ''
+  });
+
+  const formatDateForInput = (value) => {
+    if (!value) {
+      return new Date().toISOString().split('T')[0];
+    }
+    if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      return value;
+    }
+    const date = value instanceof Date ? value : new Date(value);
+    if (isNaN(date.getTime())) {
+      return new Date().toISOString().split('T')[0];
+    }
+    return date.toISOString().split('T')[0];
+  };
+
+  const addMonths = (value, months = 12) => {
+    const date = value instanceof Date ? new Date(value) : new Date(value);
+    if (isNaN(date.getTime())) {
+      return new Date();
+    }
+    date.setMonth(date.getMonth() + months);
+    return date;
+  };
+
+  const initializeLeaseForm = useCallback(() => {
+    const today = new Date();
+    const startSource = application?.leaseStartDate || application?.requestedStartDate || today;
+    const endSource = application?.leaseEndDate || application?.requestedEndDate || addMonths(startSource, 12);
+
+    setLeaseFormData({
+      leaseStartDate: formatDateForInput(startSource),
+      leaseEndDate: formatDateForInput(endSource),
+      rentalAmount: application?.rentalAmount != null ? String(application.rentalAmount) : '',
+      depositAmount: application?.depositAmount != null ? String(application.depositAmount) : '500'
+    });
+  }, [application]);
 
   const fetchApplicationData = useCallback(async () => {
     try {
@@ -88,6 +132,12 @@ const AdminApplicationDetails = () => {
     fetchApplicationData();
   }, [fetchApplicationData]);
 
+  useEffect(() => {
+    if (application) {
+      initializeLeaseForm();
+    }
+  }, [application, initializeLeaseForm]);
+
   // Check if user is authenticated and is admin
   if (!user || user.role !== 'admin') {
     navigate('/admin/login');
@@ -108,6 +158,10 @@ const AdminApplicationDetails = () => {
       if (response.ok) {
         toast.success('Application status updated');
         setApplication(prev => ({ ...prev, status: newStatus }));
+        if (newStatus === 'approved' && !application?.leaseGenerated) {
+          initializeLeaseForm();
+          setShowLeaseModal(true);
+        }
       } else {
         toast.error('Failed to update status');
       }
@@ -337,6 +391,49 @@ const AdminApplicationDetails = () => {
       toast.error('Error uploading signed lease');
     } finally {
       setUploadingLease(false);
+    }
+  };
+
+  const handleGenerateLease = async (event) => {
+    if (event) {
+      event.preventDefault();
+    }
+
+    if (!leaseFormData.leaseStartDate || !leaseFormData.leaseEndDate || !leaseFormData.rentalAmount || !leaseFormData.depositAmount) {
+      toast.error('Please complete all lease fields');
+      return;
+    }
+
+    try {
+      setGeneratingLease(true);
+      const response = await fetch('/api/lease/admin/generate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        },
+        body: JSON.stringify({
+          applicationId: id,
+          leaseStartDate: leaseFormData.leaseStartDate,
+          leaseEndDate: leaseFormData.leaseEndDate,
+          rentalAmount: Number(leaseFormData.rentalAmount),
+          depositAmount: Number(leaseFormData.depositAmount)
+        })
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.error || 'Failed to generate lease');
+      }
+
+      toast.success('Lease agreement generated!');
+      setShowLeaseModal(false);
+      await fetchApplicationData();
+    } catch (error) {
+      console.error('Error generating lease:', error);
+      toast.error(error.message || 'Error generating lease');
+    } finally {
+      setGeneratingLease(false);
     }
   };
 
@@ -1384,17 +1481,138 @@ const AdminApplicationDetails = () => {
 
                 </div>
               ) : (
-                <div className="text-center py-4">
+                <div className="text-center py-6">
                   <AlertCircle className="w-8 h-8 text-yellow-500 mx-auto mb-2" />
                   <p className="text-sm text-gray-600">
                     Lease not yet generated. Generate lease agreement to set terms and amounts.
                   </p>
+                  <div className="mt-4 space-y-2">
+                    <button
+                      onClick={() => {
+                        initializeLeaseForm();
+                        setShowLeaseModal(true);
+                      }}
+                      disabled={application.status !== 'approved' || generatingLease}
+                      className={`inline-flex items-center px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
+                        application.status === 'approved'
+                          ? 'text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50'
+                          : 'text-gray-400 bg-gray-100 cursor-not-allowed'
+                      }`}
+                    >
+                      {generatingLease ? 'Preparing...' : 'Generate Lease Agreement'}
+                    </button>
+                    {application.status !== 'approved' && (
+                      <p className="text-xs text-gray-500">
+                        Approve the application to unlock the lease generator.
+                      </p>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
           </div>
         </div>
       </div>
+
+      {/* Generate Lease Modal */}
+      {showLeaseModal && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+          <div className="relative top-20 mx-auto p-6 border w-full max-w-lg shadow-lg rounded-md bg-white">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-medium text-gray-900">Generate Lease Agreement</h3>
+              <button
+                onClick={() => setShowLeaseModal(false)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <form className="space-y-4" onSubmit={handleGenerateLease}>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Lease Start Date
+                  </label>
+                  <input
+                    type="date"
+                    value={leaseFormData.leaseStartDate}
+                    onChange={(e) => setLeaseFormData(prev => ({ ...prev, leaseStartDate: e.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Lease End Date
+                  </label>
+                  <input
+                    type="date"
+                    value={leaseFormData.leaseEndDate}
+                    onChange={(e) => setLeaseFormData(prev => ({ ...prev, leaseEndDate: e.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Monthly Rent ($)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={leaseFormData.rentalAmount}
+                    onChange={(e) => setLeaseFormData(prev => ({ ...prev, rentalAmount: e.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="0.00"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Security Deposit ($)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={leaseFormData.depositAmount}
+                    onChange={(e) => setLeaseFormData(prev => ({ ...prev, depositAmount: e.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="0.00"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div className="rounded-md bg-blue-50 border border-blue-100 p-3 text-xs text-blue-700">
+                Lease details will be saved to the application and shared with the tenant immediately after generation.
+              </div>
+
+              <div className="flex justify-end space-x-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowLeaseModal(false)}
+                  className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 border border-gray-300 rounded-lg hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={generatingLease}
+                  className="px-4 py-2 text-sm text-white bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {generatingLease ? 'Generating...' : 'Generate Lease'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Manual Payment Modal */}
       {showManualPaymentModal && (
