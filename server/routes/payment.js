@@ -959,6 +959,9 @@ router.get('/admin/revenue-summary', auth, async (req, res) => {
     const totalRevenue = payments.reduce((sum, payment) => sum + payment.amount, 0);
     const netRevenue = payments.reduce((sum, payment) => sum + (payment.amount - (payment.creditCardFee || 0)), 0);
     const totalFees = payments.reduce((sum, payment) => sum + (payment.creditCardFee || 0), 0);
+    const refundsTotal = payments
+      .filter(payment => payment.paymentType === 'refund' || payment.amount < 0)
+      .reduce((sum, payment) => sum + Math.abs(payment.amount), 0);
 
     // Revenue by payment type
     const revenueByType = payments.reduce((acc, payment) => {
@@ -990,6 +993,21 @@ router.get('/admin/revenue-summary', auth, async (req, res) => {
       }
     });
 
+    // Gather deposit refund data to adjust outstanding balances
+    const depositRefundPayments = await Payment.find({
+      paymentType: 'refund',
+      refundCategory: 'deposit',
+      applicationId: { $exists: true, $ne: null }
+    }).select('applicationId amount refundAmount refundCategory');
+
+    const depositRefundMap = depositRefundPayments.reduce((map, refund) => {
+      if (!refund.applicationId) return map;
+      const key = refund.applicationId.toString();
+      const cents = Math.abs(refund.amount || refund.refundAmount || 0);
+      map[key] = (map[key] || 0) + cents;
+      return map;
+    }, {});
+
     // Gather lease data for accrual calculations
     const applications = await Application.find({
       leaseGenerated: true,
@@ -1016,11 +1034,17 @@ router.get('/admin/revenue-summary', auth, async (req, res) => {
 
       const depositCents = Math.round(Number(application.depositAmount || 0) * 100);
       if (depositCents > 0) {
+        const appId = application._id?.toString();
+        const refundedCents = Math.min(depositRefundMap[appId] || 0, depositCents);
+        const heldDeposit = Math.max(0, depositCents - refundedCents);
         const leaseEnd = parseDateOnly(application.leaseEndDate || application.requestedEndDate);
+
+        releasedDeposits += refundedCents;
+
         if (leaseEnd && leaseEnd > nowDate) {
-          outstandingDeposits += depositCents;
+          outstandingDeposits += heldDeposit;
         } else if (leaseEnd) {
-          releasedDeposits += depositCents;
+          releasedDeposits += heldDeposit;
         }
       }
     });
@@ -1077,6 +1101,7 @@ router.get('/admin/revenue-summary', auth, async (req, res) => {
         totalRevenue,
         netRevenue,
         totalFees,
+        refundsTotal,
         paymentCount: payments.length,
         averagePayment: payments.length > 0 ? totalRevenue / payments.length : 0
       },
@@ -1302,6 +1327,79 @@ router.post('/admin/manual-payment', auth, async (req, res) => {
   } catch (error) {
     console.error('Admin manual payment error:', error);
     res.status(500).json({ error: 'Server error recording manual payment' });
+  }
+});
+
+// Admin: Record manual refund (e.g., check)
+router.post('/admin/manual-refund', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    const {
+      applicationId,
+      amount,
+      refundType = 'deposit',
+      refundDate,
+      checkNumber = '',
+      notes = '',
+      originalPaymentId
+    } = req.body;
+
+    if (!applicationId || amount === undefined) {
+      return res.status(400).json({ error: 'Application ID and amount are required' });
+    }
+
+    const parsedAmount = parseFloat(amount);
+    if (Number.isNaN(parsedAmount) || parsedAmount <= 0) {
+      return res.status(400).json({ error: 'Amount must be a positive number' });
+    }
+
+    const application = await Application.findById(applicationId).populate('userId', 'email');
+    if (!application || !application.userId) {
+      return res.status(404).json({ error: 'Application or associated user not found' });
+    }
+
+    const cents = Math.round(parsedAmount * 100);
+    const negativeCents = cents * -1;
+    const allowedRefundTypes = ['deposit', 'rent', 'other'];
+    const normalizedRefundType = allowedRefundTypes.includes(refundType) ? refundType : 'other';
+
+    const refundPayment = new Payment({
+      userId: application.userId._id,
+      applicationId: application._id,
+      stripePaymentIntentId: `manual_refund_${Date.now()}_${Math.round(Math.random() * 1e9)}`,
+      stripeCustomerId: `manual_refund_${application.userId._id}`,
+      amount: negativeCents,
+      creditCardFee: 0,
+      totalAmount: negativeCents,
+      currency: 'usd',
+      paymentType: 'refund',
+      description: notes?.trim() || `${normalizedRefundType === 'deposit' ? 'Deposit' : normalizedRefundType === 'rent' ? 'Rent' : 'Manual'} refund issued by admin`,
+      status: 'succeeded',
+      paymentMethod: 'check',
+      paidAt: refundDate ? new Date(refundDate) : new Date(),
+      refunded: true,
+      refundAmount: cents,
+      refundReason: notes,
+      refundedAt: refundDate ? new Date(refundDate) : new Date(),
+      refundCategory: normalizedRefundType,
+      originalPaymentId: originalPaymentId || undefined,
+      metadata: {
+        notes: `Manual refund check${checkNumber ? ` #${checkNumber}` : ''}${notes ? ` - ${notes}` : ''}`.trim()
+      }
+    });
+
+    await refundPayment.save();
+
+    application.lastUpdated = new Date();
+    await application.save();
+
+    res.json({ success: true, refund: refundPayment });
+  } catch (error) {
+    console.error('Admin manual refund error:', error);
+    res.status(500).json({ error: 'Server error recording manual refund' });
   }
 });
 

@@ -53,7 +53,7 @@ const paymentSchema = new mongoose.Schema({
   
   paymentType: {
     type: String,
-    enum: ['deposit', 'rent', 'late_fee', 'deposit_transfer', 'admin_transfer', 'other'],
+    enum: ['deposit', 'rent', 'late_fee', 'deposit_transfer', 'admin_transfer', 'refund', 'other'],
     required: true
   },
   
@@ -114,6 +114,15 @@ const paymentSchema = new mongoose.Schema({
   refundAmount: Number,
   refundReason: String,
   refundedAt: Date,
+  refundCategory: {
+    type: String,
+    enum: ['deposit', 'rent', 'other'],
+    default: undefined
+  },
+  originalPaymentId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Payment'
+  },
   
   // Deposit transfer information
   isDepositTransfer: {

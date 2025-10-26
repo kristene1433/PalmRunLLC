@@ -229,17 +229,15 @@ const AdminRevenueDashboard = () => {
           icon: TrendingUp
         },
         {
-          label: 'Processing Fees',
-          value: formatCurrency(cashSummary.totalFees || 0),
-          sublabel: cashSummary.paymentCount
-            ? `Avg fee ${formatCurrency((cashSummary.totalFees || 0) / cashSummary.paymentCount)}`
-            : 'Avg fee $0.00',
-          icon: CreditCard
+          label: 'Refunds Issued',
+          value: formatCurrency(cashSummary.refundsTotal || 0),
+          sublabel: cashSummary.refundsTotal ? 'Manual refunds this period' : 'No refunds recorded',
+          icon: TrendingDown
         },
         {
           label: 'Avg Payment',
           value: formatCurrency(cashSummary.averagePayment || 0),
-          sublabel: 'Cash basis view',
+          sublabel: cashSummary.paymentCount ? 'Cash basis view' : 'No payments yet',
           icon: PieChart
         }
       ]
@@ -274,7 +272,7 @@ const AdminRevenueDashboard = () => {
     ? 'Cash basis highlights what actually hit the bank during the selected period.'
     : 'Accrual basis recognizes revenue in the month the stay occurs, regardless of when payment clears.';
 
-  const monthKeys = Object.keys(cashMonthlyRevenue);
+  const monthKeys = Object.keys(cashMonthlyRevenue).sort();
   const maxBarValue = monthKeys.reduce((max, key) => {
     return Math.max(max, cashMonthlyRevenue[key] || 0, accrualMonthlyRevenue[key] || 0);
   }, 0) || 1;
@@ -594,4 +592,3 @@ const AdminRevenueDashboard = () => {
 };
 
 export default AdminRevenueDashboard;
-

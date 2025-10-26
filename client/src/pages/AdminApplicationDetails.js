@@ -5,7 +5,7 @@ import AdminNavbar from '../components/AdminNavbar';
 import {
   ArrowLeft, Edit3, Save, X, RefreshCw, CheckCircle, XCircle,
   Calendar, FileText, Upload, Download, Trash2, Plus, CreditCard,
-  User, AlertCircle, ArrowRightLeft
+  User, AlertCircle, ArrowRightLeft, Undo2
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 
@@ -40,6 +40,15 @@ const AdminApplicationDetails = () => {
   const [availableApplications, setAvailableApplications] = useState([]);
   const [loadingApplications, setLoadingApplications] = useState(false);
   const [savingTransfer, setSavingTransfer] = useState(false);
+  const [showRefundModal, setShowRefundModal] = useState(false);
+  const [refundData, setRefundData] = useState({
+    amount: '',
+    refundType: 'deposit',
+    refundDate: new Date().toISOString().split('T')[0],
+    checkNumber: '',
+    notes: ''
+  });
+  const [savingRefund, setSavingRefund] = useState(false);
   const [showLeaseModal, setShowLeaseModal] = useState(false);
   const [generatingLease, setGeneratingLease] = useState(false);
   const [leaseFormData, setLeaseFormData] = useState({
@@ -574,6 +583,51 @@ const AdminApplicationDetails = () => {
       toast.error('Error adding manual payment');
     } finally {
       setSavingManualPayment(false);
+    }
+  };
+
+  const handleManualRefund = async () => {
+    if (!refundData.amount) {
+      toast.error('Please enter a refund amount');
+      return;
+    }
+
+    try {
+      setSavingRefund(true);
+
+      const response = await fetch('/api/payment/admin/manual-refund', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        },
+        body: JSON.stringify({
+          ...refundData,
+          applicationId: id,
+          amount: parseFloat(refundData.amount)
+        })
+      });
+
+      if (response.ok) {
+        toast.success('Refund recorded successfully!');
+        setShowRefundModal(false);
+        setRefundData({
+          amount: '',
+          refundType: 'deposit',
+          refundDate: new Date().toISOString().split('T')[0],
+          checkNumber: '',
+          notes: ''
+        });
+        await fetchApplicationData();
+      } else {
+        const error = await response.json();
+        toast.error(error.error || 'Failed to record refund');
+      }
+    } catch (error) {
+      console.error('Error recording refund:', error);
+      toast.error('Error recording refund');
+    } finally {
+      setSavingRefund(false);
     }
   };
 
@@ -1189,6 +1243,13 @@ const AdminApplicationDetails = () => {
                     Transfer
                   </button>
                   <button
+                    onClick={() => setShowRefundModal(true)}
+                    className="flex items-center px-3 py-2 text-sm text-red-600 hover:text-red-700 border border-red-200 rounded-lg hover:bg-red-50"
+                  >
+                    <Undo2 className="w-4 h-4 mr-2" />
+                    Refund
+                  </button>
+                  <button
                     onClick={() => setShowManualPaymentModal(true)}
                     className="flex items-center px-3 py-2 text-sm text-blue-600 hover:text-blue-700 border border-blue-200 rounded-lg hover:bg-blue-50"
                   >
@@ -1199,38 +1260,46 @@ const AdminApplicationDetails = () => {
               </div>
 
               <div className="space-y-2">
-                {payments.slice(0, 5).map((payment) => (
-                  <div key={payment._id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-200">
-                    <div className="flex items-center space-x-3">
-                      <div className={`w-2 h-2 rounded-full ${payment.status === 'succeeded' ? 'bg-green-500' : payment.status === 'pending' ? 'bg-yellow-500' : 'bg-red-500'}`}></div>
-                      <div>
-                        <p className="text-sm font-medium text-gray-900">
-                          {payment.description}
-                        </p>
-                        <p className="text-xs text-gray-500">
-                          {formatDate(payment.createdAt)}
-                        </p>
+                {payments.slice(0, 5).map((payment) => {
+                  const isRefund = payment.paymentType === 'refund' || payment.amount < 0;
+                  return (
+                    <div key={payment._id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-200">
+                      <div className="flex items-center space-x-3">
+                        <div className={`w-2 h-2 rounded-full ${payment.status === 'succeeded' ? 'bg-green-500' : payment.status === 'pending' ? 'bg-yellow-500' : 'bg-red-500'}`}></div>
+                        <div>
+                          <p className="text-sm font-medium text-gray-900">
+                            {payment.description}
+                          </p>
+                          <p className="text-xs text-gray-500">
+                            {formatDate(payment.createdAt)}
+                          </p>
+                          {isRefund && (
+                            <span className="inline-flex items-center text-[11px] font-medium text-red-600">
+                              Refund recorded
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center space-x-3">
+                        <div className="text-right">
+                          <p className={`text-sm font-semibold ${isRefund ? 'text-red-600' : 'text-gray-900'}`}>
+                            {formatCurrency(payment.amount)}
+                          </p>
+                          <p className={`text-xs px-2 py-1 rounded-full ${getStatusColor(payment.status)}`}>
+                            {payment.status}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => handleDeletePayment(payment._id)}
+                          className="flex items-center p-1 text-red-600 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors"
+                          title="Delete payment"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
                       </div>
                     </div>
-                    <div className="flex items-center space-x-3">
-                      <div className="text-right">
-                        <p className="text-sm font-semibold text-gray-900">
-                          {formatCurrency(payment.amount)}
-                        </p>
-                        <p className={`text-xs px-2 py-1 rounded-full ${getStatusColor(payment.status)}`}>
-                          {payment.status}
-                        </p>
-                      </div>
-                      <button
-                        onClick={() => handleDeletePayment(payment._id)}
-                        className="flex items-center p-1 text-red-600 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors"
-                        title="Delete payment"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           </div>
@@ -1475,9 +1544,103 @@ const AdminApplicationDetails = () => {
                           <Trash2 className="w-4 h-4 mr-2" />
                           Delete Lease
                         </button>
-                      </div>
-                    </div>
-                  )}
+      </div>
+    </div>
+  )}
+
+      {/* Refund Modal */}
+      {showRefundModal && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+          <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
+            <div className="mt-3">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-medium text-gray-900">Record Refund</h3>
+                <button
+                  onClick={() => setShowRefundModal(false)}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <X className="h-6 w-6" />
+                </button>
+              </div>
+
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Amount</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={refundData.amount}
+                    onChange={(e) => setRefundData(prev => ({ ...prev, amount: e.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-red-500 focus:border-red-500"
+                    placeholder="0.00"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Refund Type</label>
+                  <select
+                    value={refundData.refundType}
+                    onChange={(e) => setRefundData(prev => ({ ...prev, refundType: e.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-red-500 focus:border-red-500"
+                  >
+                    <option value="deposit">Deposit</option>
+                    <option value="rent">Rent</option>
+                    <option value="other">Other</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Refund Date</label>
+                  <input
+                    type="date"
+                    value={refundData.refundDate}
+                    onChange={(e) => setRefundData(prev => ({ ...prev, refundDate: e.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-red-500 focus:border-red-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Check Number (Optional)</label>
+                  <input
+                    type="text"
+                    value={refundData.checkNumber}
+                    onChange={(e) => setRefundData(prev => ({ ...prev, checkNumber: e.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-red-500 focus:border-red-500"
+                    placeholder="Check number"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Notes (Optional)</label>
+                  <textarea
+                    value={refundData.notes}
+                    onChange={(e) => setRefundData(prev => ({ ...prev, notes: e.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-red-500 focus:border-red-500"
+                    rows={3}
+                    placeholder="Reason or context for the refund..."
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end space-x-3 mt-6">
+                <button
+                  onClick={() => setShowRefundModal(false)}
+                  className="px-4 py-2 text-sm text-gray-700 bg-gray-200 hover:bg-gray-300 rounded-lg"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleManualRefund}
+                  disabled={savingRefund}
+                  className="px-4 py-2 text-sm text-white bg-red-600 hover:bg-red-700 rounded-lg disabled:opacity-50"
+                >
+                  {savingRefund ? 'Saving...' : 'Record Refund'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
                 </div>
               ) : (
